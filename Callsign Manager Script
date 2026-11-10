@@ -1,0 +1,357 @@
+(() => {
+  "use strict";
+
+  // GeoFS In-Flight Callsign Manager
+  // - Uses the existing top-right account link
+  // - Updates that visible header text immediately after a successful save
+  // - Saves a local history of callsigns selected through this addon
+  // Paste into the console to activate
+
+  try { window.GeoFSCallsignManager?.destroy?.(); } catch (_) {}
+
+  const ACCOUNT_URL = "/pages/account.php?action=edit";
+  const HISTORY_LIMIT = 30;
+  const USER = window.geofs?.userRecord || {};
+  const HISTORY_KEY =
+    "GeoFSCallsignManager.history." +
+    String(USER.id || USER.googleid || USER.facebookid || location.host);
+
+  const style = document.createElement("style");
+  style.id = "geofs-callsign-manager-style";
+  style.textContent = `
+    #gcm-panel {
+      position:fixed; top:82px; right:16px; z-index:2147483000;
+      width:250px; box-sizing:border-box; display:none; padding:12px;
+      border:1px solid #39424b; border-radius:7px; background:#171c21;
+      color:#f3f5f7; box-shadow:0 7px 24px #0008;
+      font:13px Roboto,sans-serif;
+    }
+    #gcm-panel * { box-sizing:border-box; }
+    #gcm-panel .gcm-head {
+      display:flex; justify-content:space-between; align-items:center;
+      margin-bottom:10px; font-weight:700; letter-spacing:.5px;
+    }
+    #gcm-panel button,#gcm-panel input { font:13px Arial,sans-serif; }
+    #gcm-close {
+      border:0; background:transparent; color:#aeb8c2;
+      cursor:pointer; font-size:18px; padding:0 2px;
+    }
+    #gcm-current { color:#aeb8c2; font-size:11px; margin:0 0 9px; }
+    #gcm-list {
+      max-height:150px; overflow:auto; margin:0 0 10px;
+      border:1px solid #38424c; border-radius:5px;
+    }
+    .gcm-entry {
+      display:block; width:100%; text-align:left; border:0;
+      border-bottom:1px solid #303941; background:#20272e;
+      color:#eef2f5; padding:8px 9px; cursor:pointer;
+    }
+    .gcm-entry:last-child { border-bottom:0; }
+    .gcm-entry:hover { background:#303a44; }
+    #gcm-input {
+      display:block; width:100%; border:1px solid #56616c;
+      border-radius:4px; background:#0f1317; color:#fff;
+      padding:9px; outline:none; margin:5px 0 9px;
+    }
+    #gcm-input:focus { border-color:#d2a329; }
+    #gcm-apply {
+      width:100%; border:0; border-radius:4px; padding:9px;
+      background:#e2ad25; color:#171717; font-weight:700; cursor:pointer;
+    }
+    #gcm-apply:disabled { opacity:.55; cursor:wait; }
+    #gcm-status {
+      min-height:28px; margin-top:9px; color:#aeb8c2;
+      font-size:11px; line-height:1.35; overflow-wrap:anywhere;
+    }
+    #gcm-account {
+      display:block; margin-top:6px; color:#9eabb7;
+      font-size:11px; text-decoration:underline;
+    }
+  `;
+  document.head.appendChild(style);
+
+  const panel = document.createElement("section");
+  panel.id = "gcm-panel";
+  panel.innerHTML = `
+    <div class="gcm-head">
+      <span>CALLSIGN MANAGER</span>
+      <button id="gcm-close" type="button" aria-label="Close">×</button>
+    </div>
+    <div id="gcm-current">Current account callsign: checking…</div>
+    <div id="gcm-list"></div>
+    <label for="gcm-input" style="font-size:11px;color:#aeb8c2">
+      SELECT OR ENTER CALLSIGN
+    </label>
+    <input id="gcm-input" type="text" maxlength="40"
+      autocomplete="off" spellcheck="false" placeholder="Enter callsign">
+    <button id="gcm-apply" type="button">APPLY CALLSIGN</button>
+    <div id="gcm-status" role="status">Ready.</div>
+    <a id="gcm-account" href="${ACCOUNT_URL}" target="_blank" rel="noopener">
+      Open GeoFS account page
+    </a>
+  `;
+  document.body.appendChild(panel);
+
+  const $ = selector => panel.querySelector(selector);
+  const input = $("#gcm-input");
+  const list = $("#gcm-list");
+  const status = $("#gcm-status");
+  const apply = $("#gcm-apply");
+
+  function readHistory() {
+    try {
+      const value = JSON.parse(localStorage.getItem(HISTORY_KEY) || "[]");
+      return Array.isArray(value)
+        ? value.filter(v => typeof v === "string").slice(0, HISTORY_LIMIT)
+        : [];
+    } catch (_) { return []; }
+  }
+
+  let history = readHistory();
+  let currentCallsign = String(USER.callsign || "").trim();
+  let activeAccountLink = null;
+
+  function saveHistory() {
+    try {
+      localStorage.setItem(HISTORY_KEY, JSON.stringify(history.slice(0, HISTORY_LIMIT)));
+    } catch (error) {
+      console.warn("[GCM] Could not save local callsign history:", error);
+    }
+  }
+
+  function remember(value) {
+    const clean = String(value || "").trim();
+    if (!clean) return;
+    history = [clean, ...history.filter(item => item !== clean)].slice(0, HISTORY_LIMIT);
+    saveHistory();
+    renderHistory();
+  }
+
+  function renderHistory() {
+    list.replaceChildren();
+    const values = [...history];
+    if (currentCallsign && !values.includes(currentCallsign)) values.unshift(currentCallsign);
+
+    if (!values.length) {
+      const empty = document.createElement("div");
+      empty.textContent = "No saved callsigns yet.";
+      empty.style.cssText = "padding:9px;color:#9eabb7;font-size:11px";
+      list.appendChild(empty);
+      return;
+    }
+
+    values.forEach(value => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "gcm-entry";
+      button.textContent = value;
+      button.addEventListener("click", () => {
+        input.value = value;
+        input.focus();
+      });
+      list.appendChild(button);
+    });
+  }
+
+  function setStatus(message, isError = false) {
+    status.textContent = message;
+    status.style.color = isError ? "#ff9b91" : "#aeb8c2";
+  }
+
+  function updateVisibleAccountCallsign(newCallsign) {
+    // Preserve the account icon and all other header markup; replace only
+    // the text node that currently contains the old callsign.
+    const candidates = [];
+    if (activeAccountLink?.isConnected) candidates.push(activeAccountLink);
+
+    document.querySelectorAll("a[href]").forEach(link => {
+      const href = link.getAttribute("href") || "";
+      if (/(?:pages\/)?account\.php(?:[?#]|$)/i.test(href) ||
+          /account\.php/i.test(link.href || "")) {
+        if (!candidates.includes(link)) candidates.push(link);
+      }
+    });
+
+    let changed = false;
+    for (const link of candidates) {
+      const walker = document.createTreeWalker(link, NodeFilter.SHOW_TEXT);
+      let node;
+      while ((node = walker.nextNode())) {
+        const oldText = node.nodeValue || "";
+        if (oldText.trim()) {
+          const leading = oldText.match(/^\s*/)?.[0] || "";
+          const trailing = oldText.match(/\s*$/)?.[0] || "";
+          node.nodeValue = leading + newCallsign + trailing;
+          changed = true;
+          break;
+        }
+      }
+      if (changed) break;
+    }
+
+    // Keep GeoFS's in-memory account object aligned if it exists.
+    try {
+      if (window.geofs?.userRecord) window.geofs.userRecord.callsign = newCallsign;
+      if (window.geofs?.account) window.geofs.account.callsign = newCallsign;
+    } catch (_) {}
+
+    return changed;
+  }
+
+  function openPanel() {
+    panel.style.display = "block";
+    input.focus();
+  }
+  function closePanel() { panel.style.display = "none"; }
+  function togglePanel() {
+    panel.style.display === "block" ? closePanel() : openPanel();
+  }
+
+  $("#gcm-close").addEventListener("click", closePanel);
+
+  function isAccountLink(node) {
+    if (!(node instanceof Element)) return false;
+    const link = node.closest("a[href]");
+    if (!link) return false;
+    const href = link.getAttribute("href") || "";
+    return /(?:pages\/)?account\.php(?:[?#]|$)/i.test(href) ||
+      /account\.php/i.test(link.href || "");
+  }
+
+  function onDocumentClick(event) {
+    if (panel.contains(event.target)) return;
+    if (!isAccountLink(event.target)) return;
+    const link = event.target.closest("a[href]");
+    activeAccountLink = link;
+    event.preventDefault();
+    event.stopPropagation();
+    event.stopImmediatePropagation?.();
+    togglePanel();
+  }
+  document.addEventListener("click", onDocumentClick, true);
+
+  async function getAccountForm() {
+    const response = await fetch(ACCOUNT_URL, {
+      method: "GET", credentials: "same-origin", cache: "no-store"
+    });
+    if (!response.ok) {
+      throw new Error("Could not load GeoFS account form (HTTP " + response.status + ").");
+    }
+
+    const html = await response.text();
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    const callsignInput = doc.querySelector("#callsign");
+    const form = callsignInput?.closest("form") ||
+      doc.querySelector("form.geofs-accountForm.geofs-f-ajaxForm");
+
+    if (!form || !callsignInput) {
+      throw new Error("Account callsign form not found. Check that you're logged in.");
+    }
+    return { form, callsignInput };
+  }
+
+  async function saveCallsign() {
+    const desired = input.value.trim();
+    if (!desired) return setStatus("Enter a callsign first.", true);
+    if (desired.length > 40) return setStatus("That callsign is too long.", true);
+
+    apply.disabled = true;
+    apply.textContent = "SAVING…";
+    setStatus("Loading GeoFS account form…");
+
+    try {
+      const { form, callsignInput } = await getAccountForm();
+      const formData = new FormData(form);
+      formData.set(callsignInput.name || "callsign", desired);
+
+      const actionField = [...form.querySelectorAll('input[type="hidden"]')]
+        .find(el => el.value === "saveOICallsign");
+      if (actionField?.name) formData.set(actionField.name, "saveOICallsign");
+      else if (!formData.has("action")) formData.set("action", "saveOICallsign");
+
+      const action = new URL(
+        form.getAttribute("action") || form.action || "/backend/accounts/account.php",
+        location.href
+      );
+
+      setStatus("Sending callsign change to GeoFS…");
+      const response = await fetch(action.href, {
+        method: (form.method || "POST").toUpperCase(),
+        body: formData,
+        credentials: "same-origin",
+        redirect: "follow",
+        headers: {
+          "X-Requested-With": "XMLHttpRequest",
+          "Accept": "application/json, text/javascript, */*; q=0.01"
+        }
+      });
+      const body = await response.text();
+
+      if (!response.ok) {
+        throw new Error("GeoFS rejected the request (HTTP " + response.status + ").");
+      }
+      if (/login|sign in/i.test(response.url) && !/saveOICallsign/i.test(response.url)) {
+        throw new Error("GeoFS redirected to login. Check that you're signed in.");
+      }
+
+      let parsed = null;
+      try { parsed = JSON.parse(body); } catch (_) {}
+      if (parsed && (parsed.success === false || parsed.error || parsed.status === "error")) {
+        throw new Error(String(parsed.error || parsed.message || "GeoFS reported a save error."));
+      }
+
+      remember(desired);
+      currentCallsign = desired;
+      USER.callsign = desired;
+      $("#gcm-current").textContent = "Current account callsign: " + desired;
+
+      const headerUpdated = updateVisibleAccountCallsign(desired);
+      if (parsed && (parsed.success === true || parsed.status === "success")) {
+        setStatus(
+          headerUpdated
+            ? "Saved. Your top-right callsign has been updated."
+            : "Saved. Header text was not found; a refresh may be needed."
+        );
+      } else {
+        setStatus(
+          (headerUpdated ? "Request sent and header updated locally. " : "Request sent. ") +
+          "Verify the account save; multiplayer may need a reconnect to refresh."
+        );
+      }
+    } catch (error) {
+      console.error("[GCM] Callsign save failed:", error);
+      setStatus(error.message || "Could not save callsign. See console for details.", true);
+    } finally {
+      apply.disabled = false;
+      apply.textContent = "APPLY CALLSIGN";
+    }
+  }
+
+  apply.addEventListener("click", saveCallsign);
+  input.addEventListener("keydown", event => {
+    if (event.key === "Enter") saveCallsign();
+    event.stopPropagation();
+  });
+  input.addEventListener("keyup", event => event.stopPropagation());
+  input.addEventListener("keypress", event => event.stopPropagation());
+
+  if (currentCallsign) remember(currentCallsign);
+  $("#gcm-current").textContent =
+    "Current account callsign: " + (currentCallsign || "not detected");
+  renderHistory();
+
+  const api = {
+    destroy() {
+      document.removeEventListener("click", onDocumentClick, true);
+      panel.remove();
+      style.remove();
+      delete window.GeoFSCallsignManager;
+    },
+    open: openPanel,
+    close: closePanel,
+    getHistory: () => [...history]
+  };
+
+  window.GeoFSCallsignManager = api;
+  console.log("[GCM] v3 loaded. Click your existing top-right account/callsign link.");
+})();
